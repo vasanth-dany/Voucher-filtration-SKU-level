@@ -70,9 +70,9 @@ with st.sidebar:
         "A mechanic is only marked YES if Status = YES, the Live (launch) "
         "date isn't in the future, and the SKU isn't on the AM Exclusion list."
     )
-    apply_threshold = st.checkbox("Also require SRP ≥ a minimum price", value=False)
+    apply_threshold = st.checkbox("Also require RRP & SRP ≥ a minimum price", value=False)
     min_price = st.number_input(
-        "Minimum SRP", value=39, min_value=0, step=1, disabled=not apply_threshold
+        "Minimum price (applies to both RRP and SRP)", value=39, min_value=0, step=1, disabled=not apply_threshold
     )
 
     st.divider()
@@ -274,12 +274,15 @@ def run_filtration(price_f, content_f, zecom_f, am_f, mechanics, zecom_cols, dat
                 eligible = False
         if alu_no and alu_no in am_set:
             eligible = False
-        if apply_threshold and srp_val not in (NA, None):
-            try:
-                if float(srp_val) < min_price:
-                    eligible = False
-            except (TypeError, ValueError):
-                pass
+        if apply_threshold:
+            for price_val in (rrp_val, srp_val):
+                if price_val not in (NA, None):
+                    try:
+                        if float(price_val) < min_price:
+                            eligible = False
+                            break
+                    except (TypeError, ValueError):
+                        pass
 
         mech_vals = []
         for m in mechanics:
