@@ -70,21 +70,21 @@ with st.sidebar:
         "A mechanic is only marked YES if Status = YES, the Live (launch) "
         "date isn't in the future, and the SKU isn't on the AM Exclusion list."
     )
-    apply_threshold = st.checkbox("Also require RRP ≥ a minimum price", value=False)
+    apply_threshold = st.checkbox("Also require SRP ≥ a minimum price", value=False)
     min_price = st.number_input(
-        "Minimum RRP", value=39, min_value=0, step=1, disabled=not apply_threshold
+        "Minimum SRP", value=39, min_value=0, step=1, disabled=not apply_threshold
     )
 
     st.divider()
     st.subheader("zeCOM Column Positions")
     st.caption("0-based index — only change if the tracking file's layout changes")
     col_style  = st.number_input("Style# (ALU_NO)", value=2, min_value=0)
-    col_launch = st.number_input("Launch Date", value=19, min_value=0)
-    col_laz    = st.number_input("Status Lazada", value=21, min_value=0)
-    col_price  = st.number_input("Price (RRP)", value=46, min_value=0)
-    col_sp     = st.number_input("Special Price (SRP)", value=47, min_value=0)
-    col_disc   = st.number_input("Disc %", value=48, min_value=0)
-    col_excl   = st.number_input("Exclusion", value=49, min_value=0)
+    col_launch = st.number_input("Launch Date", value=21, min_value=0)
+    col_laz    = st.number_input("Status Lazada", value=23, min_value=0)
+    col_price  = st.number_input("Price (RRP)", value=48, min_value=0)
+    col_sp     = st.number_input("Special Price (SRP)", value=49, min_value=0)
+    col_disc   = st.number_input("Disc %", value=50, min_value=0)
+    col_excl   = st.number_input("Exclusion", value=51, min_value=0)
 
     st.divider()
     st.subheader("Price/Stock File Structure")
@@ -265,7 +265,7 @@ def run_filtration(price_f, content_f, zecom_f, am_f, mechanics, zecom_cols, dat
                     rrp_check = NA
                 row_vals = [alu_no, live, status, rrp, srp, rrp_check, pct, excl]
 
-        status_val, live_val, rrp_val, excl_val = row_vals[2], row_vals[1], row_vals[3], row_vals[7]
+        status_val, live_val, rrp_val, srp_val, excl_val = row_vals[2], row_vals[1], row_vals[3], row_vals[4], row_vals[7]
 
         eligible = (status_val == 'YES')
         if isinstance(live_val, (date, datetime)):
@@ -274,9 +274,9 @@ def run_filtration(price_f, content_f, zecom_f, am_f, mechanics, zecom_cols, dat
                 eligible = False
         if alu_no and alu_no in am_set:
             eligible = False
-        if apply_threshold and rrp_val not in (NA, None):
+        if apply_threshold and srp_val not in (NA, None):
             try:
-                if float(rrp_val) < min_price:
+                if float(srp_val) < min_price:
                     eligible = False
             except (TypeError, ValueError):
                 pass
