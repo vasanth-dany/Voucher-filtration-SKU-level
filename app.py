@@ -41,35 +41,26 @@ ZECOM_FIELD_CANDIDATES = {
 }
 
 
-def _scan_header_row(ws, max_scan_rows=10):
-    """Scans the first N rows of the zeCOM 'MY' sheet for the row that best
-    matches our expected header names, and returns (header_row, cols, score)
-    where cols maps field -> 0-based column index (matching row[idx] access
-    used elsewhere in this app)."""
-    best_row, best_cols, best_score = None, {}, 0
-    for r in range(1, max_scan_rows + 1):
-        try:
-            row_vals = [c.value for c in ws[r]]
-        except IndexError:
-            break
-        cols_found = {}
-        for field, candidates in ZECOM_FIELD_CANDIDATES.items():
-            for idx, val in enumerate(row_vals):
-                if val is None:
-                    continue
-                v = str(val).strip().lower()
-                if any(cand in v for cand in candidates):
-                    cols_found[field] = idx
-                    break
-        if len(cols_found) > best_score:
-            best_score, best_row, best_cols = len(cols_found), r, cols_found
-    return best_row, best_cols, best_score
-
-
-def auto_detect_zecom_columns(zecom_file):
+def auto_detect_zecom_columns(zecom_file, header_scan_rows=10):
     """Returns {'header_row': int, 'cols': {field: idx}, 'score': int,
     'total_fields': int} on a confident match, else None. Never raises —
-    falls back silently so the UI can show a manual-entry warning instead."""
+    falls back silently so the UI can show a manual-entry warning instead.
+
+    This uses targeted, anchor-based rules rather than a generic per-row
+    text scan, because the real zeCOM tracker has a two-row header (a
+    merged group label like "EXCLUSION" one row above a blank sub-header
+    cell), and several ambiguous repeated column names (multiple "MY RRP"
+    / "Launch Date" columns for different marketplaces):
+      - Style#: first column containing "style"
+      - Launch Date: first column mentioning both "launch" and "lazada",
+        excluding any explicitly marked "(ignore)"
+      - Status Lazada: a column whose header is *exactly* "Lazada" (not
+        merely containing it — avoids matching group labels like
+        "Lazada, Zalora & Tiktok Only")
+      - RRP / Special Price / Exclusion: anchored as fixed offsets around
+        the first "DISC %" column, since this template always lays out
+        RRP, SRP, Disc%, Exclusion as one contiguous 4-column block.
+    """
     try:
         zecom_file.seek(0)
         wb = openpyxl.load_workbook(zecom_file, read_only=True, data_only=True)
@@ -77,16 +68,78 @@ def auto_detect_zecom_columns(zecom_file):
             wb.close()
             return None
         ws = wb['MY']
-        header_row, cols_found, score = _scan_header_row(ws)
+
+        # Header row = the row (within the first N) with the most non-blank
+        # text cells — the row carrying per-column labels like "Style#".
+        best_row, best_vals, best_count = None, None, 0
+        for r in range(1, header_scan_rows + 1):
+            try:
+                row_vals = [c.value for c in ws[r]]
+            except IndexError:
+                break
+            text_count = sum(1 for v in row_vals if isinstance(v, str) and v.strip())
+            if text_count > best_count:
+                best_count, best_row, best_vals = text_count, r, row_vals
+
+        if best_row is None:
+            wb.close()
+            return None
+
+        def norm(v):
+            return str(v).strip().lower() if v is not None else ""
+
+        row = best_vals
+
+        style_idx = next(
+            (i for i, v in enumerate(row) if any(c in norm(v) for c in ZECOM_FIELD_CANDIDATES['style'])),
+            None
+        )
+        launch_idx = next(
+            (i for i, v in enumerate(row) if 'launch' in norm(v) and 'lazada' in norm(v) and 'ignore' not in norm(v)),
+            None
+        )
+        if launch_idx is None:  # fallback if no lazada-specific launch column exists
+            launch_idx = next(
+                (i for i, v in enumerate(row)
+                 if any(c in norm(v) for c in ZECOM_FIELD_CANDIDATES['launch_date']) and 'ignore' not in norm(v)),
+                None
+            )
+        status_idx = next(
+            (i for i, v in enumerate(row) if norm(v) in ('lazada', 'status lazada', 'status_lazada')),
+            None
+        )
+        disc_idx = next(
+            (i for i, v in enumerate(row) if any(c in norm(v) for c in ZECOM_FIELD_CANDIDATES['disc_pct'])),
+            None
+        )
+
+        price_idx = special_idx = exclusion_idx = None
+        if disc_idx is not None and disc_idx >= 2:
+            price_idx = disc_idx - 2
+            special_idx = disc_idx - 1
+            exclusion_idx = disc_idx + 1
+
+        cols = {}
+        for field, idx in [
+            ('style', style_idx), ('launch_date', launch_idx), ('status_laz', status_idx),
+            ('price', price_idx), ('special_price', special_idx),
+            ('disc_pct', disc_idx), ('exclusion', exclusion_idx),
+        ]:
+            if idx is not None:
+                cols[field] = idx
+
         wb.close()
         zecom_file.seek(0)
-        # Require at least 5 of 7 fields (incl. 'style') found to trust it
-        if score < 5 or 'style' not in cols_found:
+
+        # Require the anchor (disc_pct) and style to be found, plus at
+        # least 5 of 7 fields overall, before trusting the result.
+        if len(cols) < 5 or 'style' not in cols or 'disc_pct' not in cols:
             return None
+
         return {
-            'header_row': header_row,
-            'cols': cols_found,
-            'score': score,
+            'header_row': best_row,
+            'cols': cols,
+            'score': len(cols),
             'total_fields': len(ZECOM_FIELD_CANDIDATES),
         }
     except Exception:
