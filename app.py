@@ -93,6 +93,31 @@ def auto_detect_zecom_columns(zecom_file):
         return None
 
 
+def extract_unique_exclusions(zecom_file, excl_idx, start_row=5):
+    """Returns a sorted list of unique, non-blank Exclusion values found in
+    the zeCOM 'MY' sheet, using the given 0-based column index. Never
+    raises — returns [] on any failure so the UI can fall back to manual
+    text entry."""
+    try:
+        zecom_file.seek(0)
+        wb = openpyxl.load_workbook(zecom_file, read_only=True, data_only=True)
+        if 'MY' not in wb.sheetnames:
+            wb.close()
+            return []
+        ws = wb['MY']
+        vals = set()
+        for row in ws.iter_rows(min_row=start_row, values_only=True):
+            if excl_idx < len(row):
+                v = row[excl_idx]
+                if v not in (None, ''):
+                    vals.add(str(v).strip())
+        wb.close()
+        zecom_file.seek(0)
+        return sorted(vals)
+    except Exception:
+        return []
+
+
 # ── Page config ───────────────────────────────────────────────
 st.set_page_config(
     page_title="Voucher Filtration",
@@ -214,6 +239,20 @@ ZECOM_COLS = {
     'disc_pct': int(col_disc), 'exclusion': int(col_excl),
 }
 
+# Fetch the actual unique Exclusion values seen in the uploaded zeCOM file,
+# so mechanics can be built by picking from real data instead of guessing
+# wording. Falls back to an empty list (→ manual text entry) if no file
+# is uploaded yet or extraction fails.
+UNIQUE_EXCLUSIONS = []
+if _zecom_file is not None:
+    _excl_start_row = (_auto_detected['header_row'] + 1) if (auto_mode and _auto_detected) else 5
+    _excl_cache_key = f"_zecom_excl_{_zecom_file.name}_{_zecom_file.size}_{ZECOM_COLS['exclusion']}_{_excl_start_row}"
+    if _excl_cache_key not in st.session_state:
+        st.session_state[_excl_cache_key] = extract_unique_exclusions(
+            _zecom_file, ZECOM_COLS['exclusion'], _excl_start_row
+        )
+    UNIQUE_EXCLUSIONS = st.session_state[_excl_cache_key]
+
 
 # ============================================================
 # HELPER FUNCTIONS
@@ -238,7 +277,11 @@ def build_mechanics_from_ui(raw_mechanics):
     parsed = []
     for m in raw_mechanics:
         name = m['name'].strip()
-        match_values = [v.strip() for v in m['match_values'].splitlines() if v.strip()]
+        mv_raw = m['match_values']
+        if isinstance(mv_raw, list):
+            match_values = [v.strip() for v in mv_raw if v and v.strip()]
+        else:
+            match_values = [v.strip() for v in str(mv_raw).splitlines() if v.strip()]
         if not name or not match_values:
             continue
         excludes = [v.strip() for v in m['excludes'].split(',') if v.strip()]
@@ -437,7 +480,7 @@ with tab_run:
 
     if 'mechanics' not in st.session_state:
         st.session_state.mechanics = [
-            {'name': '', 'match_type': 'contains', 'match_values': '', 'excludes': ''}
+            {'name': '', 'match_type': 'contains', 'match_values': [], 'excludes': ''}
         ]
 
     _remove_idx = None
@@ -457,11 +500,23 @@ with tab_run:
             c3.markdown("&nbsp;")
             if c3.button("🗑️ Remove", key=f"mech_remove_{i}"):
                 _remove_idx = i
-            mech['match_values'] = st.text_area(
-                "zeCOM Exclusion value(s) this mechanic matches (one per line)",
-                value=mech['match_values'], key=f"mech_mv_{i}", height=70,
-                placeholder="20% VC"
-            )
+            if UNIQUE_EXCLUSIONS:
+                _current = mech['match_values'] if isinstance(mech['match_values'], list) else []
+                _valid_default = [v for v in _current if v in UNIQUE_EXCLUSIONS]
+                mech['match_values'] = st.multiselect(
+                    "zeCOM Exclusion value(s) this mechanic matches — fetched from the uploaded zeCOM file",
+                    options=UNIQUE_EXCLUSIONS,
+                    default=_valid_default,
+                    key=f"mech_mv_ms_{i}",
+                )
+            else:
+                _current_text = mech['match_values'] if isinstance(mech['match_values'], str) else "\n".join(mech['match_values'])
+                mech['match_values'] = st.text_area(
+                    "zeCOM Exclusion value(s) this mechanic matches (one per line)",
+                    value=_current_text, key=f"mech_mv_ta_{i}", height=70,
+                    placeholder="20% VC",
+                    help="Upload the zeCOM Tracking file to pick from actual values instead of typing them."
+                )
             mech['excludes'] = st.text_input(
                 "Exclude if Exclusion text also contains (comma-separated, optional)",
                 value=mech['excludes'], key=f"mech_ex_{i}",
@@ -473,7 +528,7 @@ with tab_run:
         st.rerun()
 
     if st.button("➕ Add another mechanic"):
-        st.session_state.mechanics.append({'name': '', 'match_type': 'contains', 'match_values': '', 'excludes': ''})
+        st.session_state.mechanics.append({'name': '', 'match_type': 'contains', 'match_values': [], 'excludes': ''})
         st.rerun()
 
     st.divider()
