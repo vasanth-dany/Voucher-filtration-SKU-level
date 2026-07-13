@@ -27,6 +27,72 @@ warnings.filterwarnings('ignore')
 NA = '#N/A'
 TODAY = date.today()
 
+# ── zeCOM column auto-detection ────────────────────────────────
+# Candidate header text (lowercase) for each field we need to locate.
+# Add more variants here if your tracker's column names ever change.
+ZECOM_FIELD_CANDIDATES = {
+    'style':         ['style#', 'style #', 'style', 'alu_no', 'alu no', 'aluno'],
+    'launch_date':   ['launch date', 'launch_date', 'live date'],
+    'status_laz':    ['status lazada', 'status_lazada', 'lazada status'],
+    'price':         ['price (rrp)', 'rrp'],
+    'special_price': ['special price (srp)', 'special price', 'srp'],
+    'disc_pct':      ['disc %', 'disc%', 'discount %', 'disc pct'],
+    'exclusion':     ['exclusion'],
+}
+
+
+def _scan_header_row(ws, max_scan_rows=10):
+    """Scans the first N rows of the zeCOM 'MY' sheet for the row that best
+    matches our expected header names, and returns (header_row, cols, score)
+    where cols maps field -> 0-based column index (matching row[idx] access
+    used elsewhere in this app)."""
+    best_row, best_cols, best_score = None, {}, 0
+    for r in range(1, max_scan_rows + 1):
+        try:
+            row_vals = [c.value for c in ws[r]]
+        except IndexError:
+            break
+        cols_found = {}
+        for field, candidates in ZECOM_FIELD_CANDIDATES.items():
+            for idx, val in enumerate(row_vals):
+                if val is None:
+                    continue
+                v = str(val).strip().lower()
+                if any(cand in v for cand in candidates):
+                    cols_found[field] = idx
+                    break
+        if len(cols_found) > best_score:
+            best_score, best_row, best_cols = len(cols_found), r, cols_found
+    return best_row, best_cols, best_score
+
+
+def auto_detect_zecom_columns(zecom_file):
+    """Returns {'header_row': int, 'cols': {field: idx}, 'score': int,
+    'total_fields': int} on a confident match, else None. Never raises —
+    falls back silently so the UI can show a manual-entry warning instead."""
+    try:
+        zecom_file.seek(0)
+        wb = openpyxl.load_workbook(zecom_file, read_only=True, data_only=True)
+        if 'MY' not in wb.sheetnames:
+            wb.close()
+            return None
+        ws = wb['MY']
+        header_row, cols_found, score = _scan_header_row(ws)
+        wb.close()
+        zecom_file.seek(0)
+        # Require at least 5 of 7 fields (incl. 'style') found to trust it
+        if score < 5 or 'style' not in cols_found:
+            return None
+        return {
+            'header_row': header_row,
+            'cols': cols_found,
+            'score': score,
+            'total_fields': len(ZECOM_FIELD_CANDIDATES),
+        }
+    except Exception:
+        return None
+
+
 # ── Page config ───────────────────────────────────────────────
 st.set_page_config(
     page_title="Voucher Filtration",
@@ -77,14 +143,63 @@ with st.sidebar:
 
     st.divider()
     st.subheader("zeCOM Column Positions")
-    st.caption("0-based index — only change if the tracking file's layout changes")
-    col_style  = st.number_input("Style# (ALU_NO)", value=2, min_value=0)
-    col_launch = st.number_input("Launch Date", value=21, min_value=0)
-    col_laz    = st.number_input("Status Lazada", value=23, min_value=0)
-    col_price  = st.number_input("Price (RRP)", value=48, min_value=0)
-    col_sp     = st.number_input("Special Price (SRP)", value=49, min_value=0)
-    col_disc   = st.number_input("Disc %", value=50, min_value=0)
-    col_excl   = st.number_input("Exclusion", value=51, min_value=0)
+
+    # The zecom file uploader lives further down in Tab 1, but its widget
+    # state (key='zecom') persists in session_state across reruns, so we
+    # can read it here even though the sidebar renders first.
+    _zecom_file = st.session_state.get('zecom')
+    _fallback_defaults = {
+        'style': 2, 'launch_date': 21, 'status_laz': 23,
+        'price': 48, 'special_price': 49, 'disc_pct': 50, 'exclusion': 51,
+    }
+
+    _auto_detected = None
+    if _zecom_file is not None:
+        _cache_key = f"_zecom_detect_{_zecom_file.name}_{_zecom_file.size}"
+        if _cache_key not in st.session_state:
+            st.session_state[_cache_key] = auto_detect_zecom_columns(_zecom_file)
+        _auto_detected = st.session_state[_cache_key]
+
+    auto_mode = st.checkbox(
+        "Auto-detect from zeCOM file header",
+        value=True,
+        disabled=_zecom_file is None,
+        help="Reads the header row of the uploaded zeCOM Tracking file and "
+             "locates each column by name. Upload the zeCOM file in Tab 1 first."
+    )
+
+    if _zecom_file is None:
+        st.caption("📄 Upload the zeCOM Tracking file below to enable auto-detection. Manual values used until then.")
+    elif _auto_detected is None:
+        st.warning(
+            "⚠️ Couldn't confidently auto-detect columns from this zeCOM file — "
+            "falling back to manual values below. Check that the sheet is named "
+            "'MY' and headers are recognizable, or adjust the numbers yourself."
+        )
+    elif auto_mode:
+        st.success(
+            f"✓ Auto-detected {_auto_detected['score']}/{_auto_detected['total_fields']} "
+            f"columns from header row {_auto_detected['header_row']}"
+        )
+
+    _defaults = dict(_fallback_defaults)
+    if auto_mode and _auto_detected:
+        _defaults.update(_auto_detected['cols'])
+
+    # Keying on the file identity means a newly uploaded file always shows
+    # its own freshly-detected defaults, while manual edits within the same
+    # file session are preserved across reruns.
+    _file_key = f"{_zecom_file.name}_{_zecom_file.size}" if _zecom_file is not None else "none"
+    _locked = auto_mode and _auto_detected is not None
+    st.caption("0-based index" + (" — locked to auto-detected values (uncheck above to edit)" if _locked else " — only change if the tracking file's layout changes"))
+
+    col_style  = st.number_input("Style# (ALU_NO)", value=_defaults['style'], min_value=0, disabled=_locked, key=f"col_style_{_file_key}")
+    col_launch = st.number_input("Launch Date", value=_defaults['launch_date'], min_value=0, disabled=_locked, key=f"col_launch_{_file_key}")
+    col_laz    = st.number_input("Status Lazada", value=_defaults['status_laz'], min_value=0, disabled=_locked, key=f"col_laz_{_file_key}")
+    col_price  = st.number_input("Price (RRP)", value=_defaults['price'], min_value=0, disabled=_locked, key=f"col_price_{_file_key}")
+    col_sp     = st.number_input("Special Price (SRP)", value=_defaults['special_price'], min_value=0, disabled=_locked, key=f"col_sp_{_file_key}")
+    col_disc   = st.number_input("Disc %", value=_defaults['disc_pct'], min_value=0, disabled=_locked, key=f"col_disc_{_file_key}")
+    col_excl   = st.number_input("Exclusion", value=_defaults['exclusion'], min_value=0, disabled=_locked, key=f"col_excl_{_file_key}")
 
     st.divider()
     st.subheader("Price/Stock File Structure")
